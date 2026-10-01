@@ -204,7 +204,11 @@ func (c *Client) getObjectPackage(ctx context.Context, objectURL string) (string
 		return "", err
 	}
 
-	results, err := c.SearchObject(ctx, objectName, 20)
+	// This lookup runs inside DeleteObject/UpdateSource's own gate, which with a
+	// caller-supplied lock handle is after the LOCK. A stateless request there
+	// ends the stateful context the handle belongs to and the write comes back
+	// 423 InvalidLockHandle, so while a lock is held the lookup stays in it.
+	results, err := c.searchObjectByType(ctx, objectName, "", 20, c.lockOutstanding())
 	if err != nil {
 		return "", err
 	}
@@ -374,6 +378,10 @@ func CanonicalObjectType(s string) string {
 // maxResults: filtering after the fact silently drops results that didn't
 // fit in the pre-filter window.
 func (c *Client) SearchObjectByType(ctx context.Context, query, objectType string, maxResults int) ([]SearchResult, error) {
+	return c.searchObjectByType(ctx, query, objectType, maxResults, false)
+}
+
+func (c *Client) searchObjectByType(ctx context.Context, query, objectType string, maxResults int, stateful bool) ([]SearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 100
 	}
@@ -392,9 +400,10 @@ func (c *Client) SearchObjectByType(ctx context.Context, query, objectType strin
 	}
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/repository/informationsystem/search", &RequestOptions{
-		Method: http.MethodGet,
-		Query:  params,
-		Accept: "application/xml",
+		Method:   http.MethodGet,
+		Query:    params,
+		Accept:   "application/xml",
+		Stateful: stateful,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)
